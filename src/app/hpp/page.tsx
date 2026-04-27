@@ -72,19 +72,80 @@ const DJANGO_API_BASE = process.env.NEXT_PUBLIC_DJANGO_API_URL || "http://127.0.
 
 export default function HppPage() {
   const [loading, setLoading] = useState(false);
+  const [tokenLoading, setTokenLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [traces, setTraces] = useState<ApiTrace[]>([]);
   const [paymentLink, setPaymentLink] = useState<string | null>(null);
   const [orderId, setOrderId] = useState<string | null>(null);
-  const [bearerToken, setBearerToken] = useState<string | null>(null);
+  const [tokenInput, setTokenInput] = useState("");
   const [statusResult, setStatusResult] = useState<TxStatusResponse | null>(null);
   const [autoOpen, setAutoOpen] = useState(true);
+
+  async function onGenerateToken() {
+    setTokenLoading(true);
+    setError(null);
+    try {
+      const loginUrl = `${DJANGO_API_BASE}/api/payments/obtained/hpp/login/`;
+      const loginHeaders = { "Content-Type": "application/json" };
+      const loginRes = await fetch(loginUrl, {
+        method: "POST",
+        headers: loginHeaders,
+        body: JSON.stringify({}),
+      });
+
+      let loginJson: ProxyResponse<LoginResponse>;
+      try {
+        loginJson = (await loginRes.json()) as ProxyResponse<LoginResponse>;
+      } catch {
+        loginJson = { message: "Login response was not JSON" };
+      }
+
+      setTraces((prev) => [
+        {
+          label: "1) Generate token via login API",
+          requestUrl: loginUrl,
+          method: "POST",
+          requestHeaders: loginHeaders,
+          requestBody: {},
+          httpStatus: loginRes.status,
+          responseBody: loginJson,
+        },
+        ...prev,
+      ]);
+
+      const loginData = loginJson.data;
+      const token = loginData?.data?.token;
+      if (
+        !loginRes.ok ||
+        loginJson.upstreamStatus !== 200 ||
+        loginData?.statusCode !== 200 ||
+        !token
+      ) {
+        setError(
+          [
+            "Token generation failed.",
+            `HTTP=${loginRes.status}`,
+            `upstreamHTTP=${loginJson.upstreamStatus ?? "?"}`,
+            `statusCode=${loginData?.statusCode ?? "?"}`,
+            `message=${loginData?.message ?? loginJson.message ?? "unknown"}`,
+          ].join(" ")
+        );
+        return;
+      }
+      setTokenInput(token);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : "Token request failed";
+      setError(msg);
+    } finally {
+      setTokenLoading(false);
+    }
+  }
 
   async function onSubmit(e: React.FormEvent<HTMLFormElement>) {
     e.preventDefault();
     setLoading(true);
     setError(null);
-    setTraces([]);
+    setTraces((prev) => prev);
     setPaymentLink(null);
     setOrderId(null);
     setStatusResult(null);
@@ -117,49 +178,11 @@ export default function HppPage() {
     const nextTraces: ApiTrace[] = [];
 
     try {
-      const loginUrl = `${DJANGO_API_BASE}/api/payments/obtained/hpp/login/`;
-      const loginHeaders = { "Content-Type": "application/json" };
-      const loginRes = await fetch(loginUrl, {
-        method: "POST",
-        headers: loginHeaders,
-        body: JSON.stringify({}),
-      });
-      let loginJson: ProxyResponse<LoginResponse>;
-      try {
-        loginJson = (await loginRes.json()) as ProxyResponse<LoginResponse>;
-      } catch {
-        loginJson = { message: "Login response was not JSON" };
-      }
-      nextTraces.push({
-        label: "1) Login via Next API",
-        requestUrl: loginUrl,
-        method: "POST",
-        requestHeaders: loginHeaders,
-        requestBody: {},
-        httpStatus: loginRes.status,
-        responseBody: loginJson,
-      });
-      const loginData = loginJson.data;
-      const token = loginData?.data?.token;
-      if (
-        !loginRes.ok ||
-        loginJson.upstreamStatus !== 200 ||
-        loginData?.statusCode !== 200 ||
-        !token
-      ) {
-        setTraces(nextTraces);
-        setError(
-          [
-            "Login failed.",
-            `HTTP=${loginRes.status}`,
-            `upstreamHTTP=${loginJson.upstreamStatus ?? "?"}`,
-            `statusCode=${loginData?.statusCode ?? "?"}`,
-            `message=${loginData?.message ?? loginJson.message ?? "unknown"}`,
-          ].join(" ")
-        );
+      const token = tokenInput.trim();
+      if (!token) {
+        setError("Token is required. Generate token first or paste one manually.");
         return;
       }
-      setBearerToken(token);
 
       const orderUrl = `${DJANGO_API_BASE}/api/payments/obtained/hpp/order-create/`;
       const orderHeaders = {
@@ -180,7 +203,7 @@ export default function HppPage() {
         createJson = { message: "Create order response was not JSON" };
       }
       nextTraces.push({
-        label: "2) Create HPP order via Next API",
+        label: "2) Create HPP order",
         requestUrl: orderUrl,
         method: "POST",
         requestHeaders: orderHeaders,
@@ -238,7 +261,8 @@ export default function HppPage() {
   }
 
   async function checkStatus() {
-    if (!orderId || !bearerToken) {
+    const token = tokenInput.trim();
+    if (!orderId || !token) {
       setError("Order ID or token missing. Create an order first.");
       return;
     }
@@ -251,7 +275,7 @@ export default function HppPage() {
         method: "POST",
         headers,
         body: JSON.stringify({
-          token: bearerToken,
+          token,
           orderId,
         }),
       });
@@ -309,6 +333,26 @@ export default function HppPage() {
           />
           Auto-open payment link in a new tab
         </label>
+        <div className="rounded-xl border border-zinc-800 bg-zinc-900/40 p-4 space-y-3">
+          <div className="flex items-center justify-between gap-3">
+            <p className="text-sm text-zinc-300">Token (manual or generated)</p>
+            <button
+              type="button"
+              onClick={onGenerateToken}
+              disabled={tokenLoading || loading}
+              className="rounded-lg bg-indigo-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-indigo-500 disabled:opacity-60"
+            >
+              {tokenLoading ? "Generating..." : "Generate token"}
+            </button>
+          </div>
+          <textarea
+            value={tokenInput}
+            onChange={(e) => setTokenInput(e.target.value)}
+            rows={3}
+            placeholder="Paste token here or click Generate token"
+            className="w-full rounded border border-zinc-700 bg-zinc-950 px-3 py-2 text-xs font-mono text-zinc-100"
+          />
+        </div>
         <form onSubmit={onSubmit} className="space-y-4 rounded-xl border border-zinc-800 bg-zinc-900/40 p-6">
           <div className="grid grid-cols-2 gap-3">
           </div>
